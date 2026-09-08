@@ -21,7 +21,9 @@ posts anything. Every request it makes is a page you could open yourself.
 Updates arrive on their own — Tampermonkey checks this file and offers the new version.
 
 The first time you use **Inactive near me**, Tampermonkey asks whether the script may talk to
-`travcotools.com`. Allow it, or that one panel stays empty.
+`travcotools.com`. Allow it, or that one panel stays empty. You do not have to tell it which
+game world you are on — it works that out from the address, and asks travcotools directly if
+the world is new enough not to be in the built-in list.
 
 ## The panels
 

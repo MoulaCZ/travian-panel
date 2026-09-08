@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian – Farmlist last-sent
 // @namespace    stepanek
-// @version      10.28.0
+// @version      10.29.1
 // @description  Side panel: farm list timers, what one click sends and loots, and which targets paid best.
 // @match        *://*.travian.com/*
 // @match        *://*.traviangames.com/*
@@ -88,7 +88,7 @@
     const settings = Object.assign({
         hidden: [], hiddenVillages: [], perList: {},
         win: {}, help: {}, trainWarn: 30, flyUnits: null, flyTo: '',
-        travcoServer: '', afkDays: 1, afkDist: 20, afkPop: '', afkKnown: false,
+        travcoServer: '', travcoLearned: '', travcoFixed: 0, afkDays: 1, afkDist: 20, afkPop: '', afkKnown: false,
         tsPct: {},
         afkNatars: true, afkCapital: '',
         warnMin: 20, alertMin: 30,
@@ -1009,7 +1009,19 @@
     // travian.com hosts every world on its own name, so the world is simply the host with
     // the domain cut off - and that is the key their table uses.
     const travcoAuto = () => TRAVCO_SERVERS[String(location.host).replace(/\.travian\.com$/, '')] || 0;
-    const travcoId = () => Math.round(Number(settings.travcoServer)) || travcoAuto();
+    const travcoId = () => Math.round(Number(settings.travcoServer)) || travcoAuto() ||
+                           Math.round(Number(settings.travcoLearned)) || 0;
+
+    // The built-in table ages the moment Travian opens a new world, so a world it does not
+    // know is looked up in their own search form, which lists every world with its id.
+    async function travcoLookup() {
+        const doc = new DOMParser().parseFromString(
+            await gmGet('https://travcotools.com/en/inactive-search/'), 'text/html');
+        for (const o of doc.querySelectorAll('select[name="travian_server"] option')) {
+            if (plain(o.textContent) === String(location.host)) return Number(o.value) || 0;
+        }
+        return 0;
+    }
 
     async function loadInactive() {
         if (loadingAfk) return;
@@ -1020,9 +1032,21 @@
         if (!from) { afkError = 'No village coordinates yet - open any game page once.'; render(); return; }
 
         if (!travcoId()) {
-            afkError = 'This world is not in the travcotools list - put its id in Settings.';
+            loadingAfk = true;
             render();
-            return;
+            try {
+                const found = await travcoLookup();
+                if (found) { settings.travcoLearned = found; persist(); }
+            } catch (e) {
+                afkError = 'Could not reach travcotools.com: ' + e.message;
+            }
+            loadingAfk = false;
+            if (!travcoId()) {
+                afkError = afkError || 'travcotools.com does not list this world (' +
+                    location.host + ') - if it should, put its id in Settings.';
+                render();
+                return;
+            }
         }
 
         loadingAfk = true;
@@ -3167,6 +3191,19 @@
 
     // ---------- start ----------
     try {
+        // One-off cleanup: an earlier version shipped 1460 as the default CONTENTS of the
+        // override field, so every world saved it as if the player had typed it - and an
+        // override beats the world the address says. Anything that looks like that leftover
+        // goes; a value the player really chose is left alone.
+        if (!settings.travcoFixed) {
+            const auto = travcoAuto();
+            if (String(settings.travcoServer) === '1460' && auto && auto !== 1460) {
+                settings.travcoServer = '';
+            }
+            settings.travcoFixed = 1;
+            persist();
+        }
+
         learnCoords(document.documentElement.innerHTML);
         learnCrop();
         const inline = parseGame(document.documentElement.innerHTML);
