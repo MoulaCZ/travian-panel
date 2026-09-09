@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian – Farmlist last-sent
 // @namespace    stepanek
-// @version      10.29.1
+// @version      10.31.1
 // @description  Side panel: farm list timers, what one click sends and loots, and which targets paid best.
 // @match        *://*.travian.com/*
 // @match        *://*.traviangames.com/*
@@ -88,7 +88,7 @@
     const settings = Object.assign({
         hidden: [], hiddenVillages: [], perList: {},
         win: {}, help: {}, trainWarn: 30, flyUnits: null, flyTo: '',
-        travcoServer: '', travcoLearned: '', travcoFixed: 0, afkDays: 1, afkDist: 20, afkPop: '', afkKnown: false,
+        travcoServer: '', travcoLearned: '', travcoFixed: 0, afkDays: 1, afkPages: 10, afkDist: 20, afkPop: '', afkKnown: false,
         tsPct: {},
         afkNatars: true, afkCapital: '',
         warnMin: 20, alertMin: 30,
@@ -134,6 +134,7 @@
     let afk = load(LS_AFK, null);          // { at, rows: [...] }
     let loadingAfk = false;
     let afkError = null;
+    let afkPage = 0;
 
     let runs = load(LS_RUNS, {});   // villageId -> { at, events: [{at, troop}], seen, skipped, declared, trained }
     let loadingRun = false;
@@ -1006,6 +1007,13 @@
         return rows;
     }
 
+    // Their rows link to the world the answer belongs to, which is the only way to tell that
+    // a search really is about the game being played.
+    const inactiveHost = html => {
+        const m = String(html).match(/href="https?:\/\/([a-z0-9.-]*travian\.com)\/karte\.php/i);
+        return m ? m[1] : '';
+    };
+
     // travian.com hosts every world on its own name, so the world is simply the host with
     // the domain cut off - and that is the key their table uses.
     const travcoAuto = () => TRAVCO_SERVERS[String(location.host).replace(/\.travian\.com$/, '')] || 0;
@@ -1051,6 +1059,7 @@
 
         loadingAfk = true;
         afkError = null;
+        afkPage = 0;
         render();
         try {
             // Empty fields are left out of the query, which is what their form does for
@@ -1062,7 +1071,11 @@
                 distance_max: Math.round(Number(settings.afkDist) || 20),
                 max_pop_increase: 0,
                 order_by: 'distance',
-                page_size: 50
+                page_size: 50,
+                // 2 = both. Their own farm list filter is a setting of THEIR account and would
+                // quietly narrow the answer for a logged in player; the script checks the farm
+                // lists itself, from the game, so it always asks for everything.
+                is_in_farmlist: 2
             };
             const pop = String(settings.afkPop == null ? '' : settings.afkPop).trim();
             if (pop !== '' && Number(pop) > 0) q.village_pop_max = Math.round(Number(pop));
@@ -1070,11 +1083,44 @@
             // '' any, '0' only capitals, '1' only non-capitals - their numbering, not mine.
             const cap = String(settings.afkCapital == null ? '' : settings.afkCapital);
             if (cap === '0' || cap === '1') q.village_is_capital = cap;
-            const url = 'https://travcotools.com/en/inactive-search/?' +
+            const base = 'https://travcotools.com/en/inactive-search/?' +
                 Object.keys(q).map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-            const rows = parseInactive(await gmGet(url));
+
+            // Their pages hold fifty villages each, so anything but the closest handful is on
+            // page two and beyond. Pages are read until one comes back short or empty, with a
+            // breath between them - it is their server, and nothing here is on a timer.
+            const maxPages = Math.min(40, Math.max(1, Math.round(Number(settings.afkPages) || 10)));
+            const seen = new Set();
+            const rows = [];
+            let host = '', pages = 0;
+            for (let page = 1; page <= maxPages; page++) {
+                if (page > 1) await new Promise(r => setTimeout(r, 400));
+                let html;
+                try {
+                    html = await gmGet(base + '&page=' + page);
+                } catch (e) {
+                    // Their site answers a page past the last one with 404, so that is the end
+                    // of the list, not a failure - unless it happens on the very first page.
+                    if (page === 1) throw e;
+                    break;
+                }
+                const batch = parseInactive(html);
+                pages = page;
+                if (!host) host = inactiveHost(html);
+                let added = 0;
+                for (const r of batch) {
+                    if (seen.has(r.mapId)) continue;
+                    seen.add(r.mapId);
+                    rows.push(r);
+                    added++;
+                }
+                afkPage = page;
+                render();
+                if (batch.length < 50 || !added) break;      // last page, or the same one again
+            }
             if (!rows.length) throw new Error('no rows - check the server id in Settings');
-            afk = { at: now, from: { id: from.id, name: from.name, x: from.x, y: from.y }, rows };
+            afk = { at: now, from: { id: from.id, name: from.name, x: from.x, y: from.y }, rows,
+                    host, pages };
             save(LS_AFK, afk);
             console.log('[flTimer] inactive: ' + rows.length + ' village(s)');
         } catch (e) {
@@ -2121,6 +2167,9 @@
             '<div class="num"><span>Max fields away</span>' +
               '<input type="number" min="1" step="1" data-set="afkDist" value="' +
               (settings.afkDist || 20) + '"></div>' +
+            '<div class="num"><span>Pages to read</span>' +
+              '<input type="number" min="1" max="40" step="1" data-set="afkPages" value="' +
+              (settings.afkPages || 10) + '"></div>' +
             '<div class="num"><span>Max village pop</span>' +
               '<input type="number" min="0" step="1" data-set="afkPop" data-text="1" ' +
               'placeholder="any" value="' + esc(settings.afkPop == null ? '' : settings.afkPop) +
@@ -2428,7 +2477,10 @@
                   '>' + esc(v.name) + '</option>').join('') + '</select></div>'
             : '';
 
-        if (loadingAfk) return { body: picker + '<div class="empty">Searching&hellip;</div>' };
+        if (loadingAfk) {
+            return { body: picker + '<div class="empty">Searching&hellip;' +
+                           (afkPage > 1 ? ' page ' + afkPage : '') + '</div>' };
+        }
         if (!afk || !afk.rows) {
             return { body: picker + '<div class="empty">' + (afkError ? esc(afkError) + '<br>' : '') +
                            '<button data-afkgo="1">Search</button></div>',
@@ -2478,6 +2530,11 @@
                     ' already in a farm list &mdash; ' + (showKnown ? 'hide' : 'show') +
                     '</button></div>';
         }
+        if (afk.host && afk.host !== String(location.host)) {
+            foot += '<div class="foot"><span class="bad">These results are from ' + esc(afk.host) +
+                    ', not from this world.</span> Clear the server id in Settings and press the ' +
+                    'arrow &mdash; empty means the world is worked out from the address.</div>';
+        }
         if (afk.from.id !== (flyOrigin() || {}).id) {
             foot += '<div class="foot">searched from ' + esc(afk.from.name) +
                     ' &mdash; press the arrow to search from ' +
@@ -2524,8 +2581,9 @@
                 'The village at the top is where the search is centred - the same one the ' +
                 'Travel time panel measures from. Change it and press the arrow to search again.',
                 '',
-                fmtNum(afk.rows.length) + ' found, ' + fmtNum(rows.length - fresh.length) +
-                ' of them already in a list. Searched at ' + clockAt(afk.at) + '.'
+                fmtNum(afk.rows.length) + ' villages read from ' + fmtNum(afk.pages || 1) +
+                ' page(s), ' + fmtNum(rows.length - fresh.length) + ' of them already in a list. ' +
+                'How many pages to read is in Settings. Searched at ' + clockAt(afk.at) + '.'
             ].join('\u000a')
         };
     }
