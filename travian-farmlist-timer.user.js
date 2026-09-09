@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian – Farmlist last-sent
 // @namespace    stepanek
-// @version      10.31.1
+// @version      10.33.1
 // @description  Side panel: farm list timers, what one click sends and loots, and which targets paid best.
 // @match        *://*.travian.com/*
 // @match        *://*.traviangames.com/*
@@ -87,7 +87,8 @@
 
     const settings = Object.assign({
         hidden: [], hiddenVillages: [], perList: {},
-        win: {}, help: {}, trainWarn: 30, flyUnits: null, flyTo: '',
+        win: {}, help: {}, trainWarn: 30, trainAlert: true, trainOff: [],
+        flyUnits: null, flyTo: '',
         travcoServer: '', travcoLearned: '', travcoFixed: 0, afkDays: 1, afkPages: 10, afkDist: 20, afkPop: '', afkKnown: false,
         tsPct: {},
         afkNatars: true, afkCapital: '',
@@ -1508,6 +1509,18 @@
         console.log('[flTimer] ALERT: ' + body);
     }
 
+    function fireTrainAlert(name, sec) {
+        const body = name + ' \u2014 ' + (sec <= 0 ? 'barracks or stable is idle'
+                                                    : fmtHM(sec) + ' left in the queue');
+        try {
+            if (settings.notify && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                new Notification('Training running out', { body, tag: 'flTimerTrain-' + name });
+            }
+        } catch {}
+        if (settings.sound) beep();
+        console.log('[flTimer] ALERT: ' + body);
+    }
+
     // Everything that wants attention right now: an overdue list, or a village whose
     // training queue has fallen under the threshold.
     function pending() {
@@ -1523,6 +1536,7 @@
             const age = Math.max(0, now - training.at);
             for (const v of training.villages) {
                 if (settings.hiddenVillages.indexOf(v.id) !== -1) continue;
+                if (!trainWatched(v.id)) continue;
                 let worst = null;
                 for (const gid of TRAIN_MAIN) {
                     if (v.q[gid] === undefined) continue;
@@ -1569,6 +1583,36 @@
             } else if (!red && already) {
                 settings.notified = settings.notified.filter(x => x !== l.id);
                 changed = true;
+            }
+        }
+
+        // The same treatment for the training queues, so an empty barracks reaches the
+        // desktop and not only the tab title. Village keys are prefixed, list ids are not,
+        // so the two can never be mistaken for each other.
+        if (training && training.villages) {
+            const warnSec = Math.max(1, Number(settings.trainWarn) || 30) * 60;
+            const age = Math.max(0, now - training.at);
+            for (const v of training.villages) {
+                const key = 'v' + v.id;
+                const watched = trainWatched(v.id) && settings.hiddenVillages.indexOf(v.id) === -1;
+                let worst = null;
+                if (watched) {
+                    for (const gid of TRAIN_MAIN) {
+                        if (v.q[gid] === undefined) continue;
+                        const t = Math.max(0, v.q[gid] - age);
+                        if (worst === null || t < worst) worst = t;
+                    }
+                }
+                const low = worst !== null && worst < warnSec;
+                const already = settings.notified.includes(key);
+                if (low && !already) {
+                    if (!silent) fireTrainAlert(v.name, worst);
+                    settings.notified.push(key);
+                    changed = true;
+                } else if (!low && already) {
+                    settings.notified = settings.notified.filter(x => x !== key);
+                    changed = true;
+                }
             }
         }
         if (changed) persist();
@@ -2095,6 +2139,22 @@
             '><span>' + esc(unitName(tribe, u)) + ' &middot; ' + sp[u].toFixed(0) + ' fields/h</span></label>').join('');
     }
 
+    // The villages to tick are the ones the game lists, plus anything the training page
+    // knows about but the sidebar did not mention, so nothing can raise an alarm that
+    // cannot be switched off.
+    function trainVillageRows() {
+        const list = villagesInOrder();
+        const seen = new Set(list.map(v => v.id));
+        if (training && training.villages) {
+            for (const v of training.villages) if (!seen.has(v.id)) { seen.add(v.id); list.push(v); }
+        }
+        if (!list.length) return '';
+        return list.map(v =>
+            '<label><input type="checkbox" data-train-v="' + v.id + '"' +
+            ((settings.trainOff || []).indexOf(v.id) === -1 ? ' checked' : '') +
+            '><span>' + esc(v.name) + '</span></label>').join('');
+    }
+
     function viewConfig() {
         const perm = (typeof Notification === 'undefined') ? 'unsupported' : Notification.permission;
 
@@ -2131,7 +2191,7 @@
             '<div class="num"><span>Red after</span>' +
               '<input type="number" min="0" step="1" data-set="alertMin" value="' + settings.alertMin + '"></div>' +
 
-            '<div class="sect">Alert when a list turns red</div>' +
+            '<div class="sect">Alert when a list turns red or a queue runs out</div>' +
             '<label><input type="checkbox" data-set="notify"' + (settings.notify ? ' checked' : '') +
               '><span>Desktop notification</span></label>' +
             '<label><input type="checkbox" data-set="sound"' + (settings.sound ? ' checked' : '') +
@@ -2144,9 +2204,13 @@
               '<button data-act="perm">Request</button></div>' +
 
             '<div class="sect">In training</div>' +
+            '<label><input type="checkbox" data-set="trainAlert"' +
+              (settings.trainAlert === false ? '' : ' checked') +
+              '><span>Watch the queues at all</span></label>' +
             '<div class="num"><span>Warn under (min)</span>' +
               '<input type="number" min="1" step="1" data-set="trainWarn" value="' +
               (settings.trainWarn || 30) + '"></div>' +
+            trainVillageRows() +
 
             '<div class="sect">Tournament Square &mdash; % the game shows</div>' +
             (vcoords ? villagesInOrder().map(v =>
@@ -2201,6 +2265,11 @@
     // ---------- training view ----------
     const BARRACKS = [19, 29], STABLE = [20, 30];
     const TRAIN_MAIN = [19, 20];        // the two that must never run dry
+
+    // Whether an empty queue in this village is worth being told about. A village that is
+    // not watched still shows its times - it just never raises the alarm.
+    const trainWatched = vid => settings.trainAlert !== false &&
+                                (settings.trainOff || []).indexOf(Number(vid)) === -1;
     // Chopping the game's own names at six characters gave 'BARRAC' and 'WORKSH'.
     const TRAIN_SHORT = { 19: 'Barr', 20: 'Stable', 21: 'Works', 29: 'G.Barr',
                           30: 'G.Stbl', 46: 'Hosp' };
@@ -2235,7 +2304,9 @@
                 if (t === null) continue;
                 if (worst === null || t < worst) worst = t;
             }
-            const cls = worst === null ? '' : worst <= 0 ? 'bad' : worst < warnSec ? 'warn' : '';
+            const watched = trainWatched(v.id);
+            const cls = !watched ? 'mute'
+                      : worst === null ? '' : worst <= 0 ? 'bad' : worst < warnSec ? 'warn' : '';
             const cells = shown.map(c => {
                 const t = left(v, c.gid);
                 // An empty cell would read the same as a building that is not there, so an
@@ -2264,7 +2335,8 @@
                 '',
                 'The village name turns amber when the barracks or stable has under ' +
                 Math.round(warnSec / 60) + ' minutes left (Settings), and red when one of them ' +
-                'is standing idle.',
+                'is standing idle. A village you have switched off in Settings is grey: its ' +
+                'times are still shown, it just never sets off the alert.',
                 '',
                 'Read at ' + clockAt(training.at) + '. Press the arrow to read it again.'
             ].join('\u000a')
@@ -2681,6 +2753,10 @@
                 '',
                 'The coloured dot says which village the list belongs to.',
                 '',
+                'A list name in amber is set to a cadence its troops cannot keep: the red mark ' +
+                'comes round sooner than the list can be filled again. Hover the row, or open ' +
+                'the list, and it says by how much. A black name keeps up.',
+                '',
                 'Click a list name to open its own numbers: how often it can go, what it pays, ' +
                 'how long the round trip is.'
             ].join('\u000a') };
@@ -3020,6 +3096,15 @@
                 if (fly.dataset.fly === 'to') settings.flyTo = fly.value;
                 else settings.flyFrom = Number(fly.value);
                 persist(); render();
+                return;
+            }
+
+            const tv = e.target.closest('input[data-train-v]');
+            if (tv) {
+                const vid = Number(tv.dataset.trainV);
+                const off = settings.trainOff || [];
+                settings.trainOff = tv.checked ? off.filter(x => x !== vid) : off.concat(vid);
+                persist(); checkAlerts(true); render();
                 return;
             }
 
