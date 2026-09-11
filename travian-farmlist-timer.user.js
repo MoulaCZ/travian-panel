@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian – Farmlist last-sent
 // @namespace    stepanek
-// @version      10.33.1
+// @version      10.35.1
 // @description  Side panel: farm list timers, what one click sends and loots, and which targets paid best.
 // @match        *://*.travian.com/*
 // @match        *://*.traviangames.com/*
@@ -289,6 +289,8 @@
                     last: started,
                     running: l.runningRaidsAmount || 0,
                     slots: l.slotsAmount || 0,
+                    // Where the game itself puts this list inside its village.
+                    sortIndex: Number(l.sortIndex) || 0,
                     activeSlots: states.filter(s => s.isActive).length || (l.slotsAmount || 0),
                     villageId: vid,
                     village: v.name || '',
@@ -1891,6 +1893,14 @@
             }
         }
 
+        // What one press of the button actually sends, added up over the active slots.
+        const send = Object.keys(l.need || {})
+            .filter(k => l.need[k] > 0)
+            .sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+            .map(k => fmtNum(l.need[k]) + ' ' + unitName(l.tribe, Number(k.slice(1))));
+        rows.push('<div class="kv"><span class="k">Sends</span><span class="v">' +
+            (send.length ? esc(send.join(', ')) : 'nothing') +
+            (l.exact ? '' : ' <span class="mute">(guessed)</span>') + '</span></div>');
         rows.push('<div class="kv"><span class="k">Loot per click</span><span class="v">' +
             (st.lootKnown ? '&asymp; ' + fmtNum(st.loot) + ' res' : 'no raids yet') + '</span></div>');
         rows.push('<div class="kv"><span class="k">Round trip</span><span class="v">' +
@@ -1954,11 +1964,19 @@
     // A tile: collapsible section with an uppercase label. Open state is remembered.
     function listRows(now) {
         // Fixed order, not "most overdue first": rows that jump around are hard to find,
-        // and the colour plus the bar already say which one needs doing.
+        // and the colour plus the bar already say which one needs doing. The order is the
+        // game's own - villages as the sidebar lists them, lists as the rally point does -
+        // because the order the farm list page happens to send them in moves around with
+        // whichever village is open.
         const vorder = [];
         for (const l of cache.lists) if (vorder.indexOf(l.villageId) === -1) vorder.push(l.villageId);
+        const rank = id => {
+            const r = villageRank(id);
+            return r === 1e9 ? 1e6 + vorder.indexOf(id) : r;
+        };
         const shown = cache.lists.filter(visible).sort((a, b) =>
-            (vorder.indexOf(a.villageId) - vorder.indexOf(b.villageId)) ||
+            (rank(a.villageId) - rank(b.villageId)) ||
+            ((a.sortIndex || 0) - (b.sortIndex || 0)) ||
             String(a.name).localeCompare(String(b.name)));
         if (!shown.length) return '<div class="empty">Nothing selected (&#9776;).</div>';
 
